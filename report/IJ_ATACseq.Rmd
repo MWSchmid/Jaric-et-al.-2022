@@ -1,0 +1,1132 @@
+---
+title: "Ivana Jaric, ATACseq"
+author: "Marc W Schmid"
+date: "1st of December, 2020"
+output:
+  html_document:
+    toc: true # table of content true
+    depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united # HTML theme
+    highlight: kate  # specifies the syntax highlighting style
+bibliography: reportReferences.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = TRUE)
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+# ATACseq
+
+[Quality standards](https://www.encodeproject.org/atac-seq/#standards)
+
+```{sh}
+export PATH=$HOME/miniconda2/bin:$PATH
+BASEDIR="/media/mwschmid/myData/MWSchmid/Ivana_ATAC"
+READS="$BASEDIR/GitIgnore_reads"
+TRIMMED="$BASEDIR/GitIgnore_fastq_trimmed"
+QUALS="$BASEDIR/GitIgnore_quals"
+OUBAM="$BASEDIR/GitIgnore_aligned"
+COUNTDIR="$BASEDIR/GitIgnore_counts"
+DEFAULTPEAKS="$BASEDIR/GitIgnore_peaks"
+DEEPTOOLSDIR="$BASEDIR/GitIgnore_deepTools"
+COVERAGEPLOTS="$BASEDIR/GitIgnore_coveragePlots"
+MERGEDPEAKS="$BASEDIR/GitIgnore_peaks_merged"
+RESULTS="$BASEDIR/GitIgnore_results"
+SCRIPTDIR="$BASEDIR/scripts"
+INDEXROOT="/media/mwschmid/archiveNoBackup/genomes/ensembl102/MmGRCm38dna"
+REGULATORYDIR="$INDEXROOT/regulatory"
+INDEX="$INDEXROOT/bowtie2/index"
+TEMPDIR="/home/marc/tempIJA"
+#TEMPDIR="/media/localData/tempIJA"
+BWNORMGENOME="2470611367" # calculated for RL 125 and ensembl91 and ensembl 102 is the same
+PICARD=$HOME/picard.jar
+mkdir -p $TEMPDIR
+
+ALLGROUPS=("T1.Bern" "T1.Hannover1" "T1.Hannover2" "T1.Munster" "T1.Zurich" "T2.Bern" "T2.Hannover1" "T2.Hannover2" "T2.Munster" "T2.Zurich")
+
+# get the mappable genome size 
+#https://khmer.readthedocs.io/en/v2.1.2/user/install.html
+#python2.7 -m virtualenv khmerEnv
+#source khmerEnv/bin/activate
+#pip2 install khmer
+source khmerEnv/bin/activate
+zcat $INDEXROOT/Mm_GRC38_dna.fa.gz > $TEMPDIR/refGenome.fasta
+unique-kmers.py -k 125 $TEMPDIR/refGenome.fasta
+rm $TEMPDIR/refGenome.fasta
+deactivate
+```
+
+# Dependencies
+
+```{sh}
+conda create -n ivana2020 python=2.7 bowtie2 pysam numpy samtools subread deeptools macs2 fastp pybigwig
+conda list -n ivana2020 > $BASEDIR/report/packagesInIvana2020.txt
+
+sudo cp /media/mwschmid/archiveNoBackup/Progs/multovl-1.3/multovl /usr/local/bin
+sudo chmod +x /usr/local/bin/multovl
+```
+
+# Download
+
+## Data with browser
+
+[Time point 1](https://ftp01.binf.unibe.ch:5001/sharing/kJZShigyR)
+
+[Time point 2](https://ftp01.binf.unibe.ch:5001/sharing/FTM4uYO2h)
+
+## Genome
+
+```{sh}
+sh /media/mwschmid/myData/MWSchmid/NGS-VM/roles/retrieveChromosomes/files/downloadGenome.sh -R "ftp://ftp.ensembl.org/pub/release-102/fasta/mus_musculus/dna" -I Mus_musculus.GRCm38.dna -N 19 -F "$TEMPDIR/MmGRCm38dna" -P Mm_GRC38_dna
+mkdir -p $INDEXROOT
+pigz -p 8 Mm_GRC38_dna*.fa
+mv Mm_GRC38_dna*.fa.gz $INDEXROOT/
+
+wget ftp://ftp.ensembl.org/pub/release-102/regulation/mus_musculus/mus_musculus.GRCm38.Regulatory_Build.regulatory_features.20180516.gff.gz -O $REGULATORYDIR/mus_musculus.GRCm38.Regulatory_Build.regulatory_features.20180516.gff.gz
+wget ftp://ftp.ensembl.org/pub/release-102/regulation/mus_musculus/MotifFeatures/Mus_musculus.GRCm38.motif_features.gff.gz -O $REGULATORYDIR/Mus_musculus.GRCm38.motif_features.gff.gz
+python $SCRIPTDIR/regulatoryGFFtoBED.py $REGULATORYDIR/mus_musculus.GRCm38.Regulatory_Build.regulatory_features.20180516.gff.gz $REGULATORYDIR
+```
+
+# Processing
+
+## Trim with fastp version, nextera transposase
+
+```{sh}
+source activate ivana2020
+### Timepoint 1
+for SAMPLE in {1..25}; do
+PREFIX="S${SAMPLE}"
+cp $READS/${SAMPLE}_ATAC_S${SAMPLE}_*.fastq.gz $TEMPDIR/
+pigz -c -d -p 10 "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L001_R1_001.fastq.gz" "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L002_R1_001.fastq.gz" | pigz -c -p 20 - > $TEMPDIR/${PREFIX}_R1.fastq.gz
+pigz -c -d -p 10 "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L001_R2_001.fastq.gz" "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L002_R2_001.fastq.gz" | pigz -c -p 20 - > $TEMPDIR/${PREFIX}_R2.fastq.gz
+fastp -w 16 -l 30 -a CTGTCTCTTATACACATCT -i $TEMPDIR/${PREFIX}_R1.fastq.gz -I $TEMPDIR/${PREFIX}_R2.fastq.gz -o $TEMPDIR/${PREFIX}_R1.tr.fq.gz -O $TEMPDIR/${PREFIX}_R2.tr.fq.gz -j $TEMPDIR/$PREFIX.json -h $TEMPDIR/$PREFIX.html
+mv $TEMPDIR/*.tr.fq.gz $TRIMMED/
+mv $TEMPDIR/$PREFIX.json $QUALS/
+mv $TEMPDIR/$PREFIX.html $QUALS/
+rm $TEMPDIR/*.fastq.gz
+done
+### Timepoint 2
+for SAMPLE in {1..21} {24..27}; do
+if [ $SAMPLE -eq 4 ]; then
+LONGPREFIX="Sample_4_S23"
+elif [ $SAMPLE -eq 25 ]; then
+LONGPREFIX="Sample_25_S22"
+elif [ $SAMPLE -eq 26 ]; then
+LONGPREFIX="Sample_26_S4"
+elif [ $SAMPLE -eq 27 ]; then
+LONGPREFIX="Sample_27_S25"
+else
+LONGPREFIX="Sample_${SAMPLE}_S${SAMPLE}"
+fi
+PREFIX="T${SAMPLE}"
+cp $READS/$LONGPREFIX*.fastq.gz $TEMPDIR/
+pigz -c -d -p 10 "$TEMPDIR/${LONGPREFIX}_L001_R1_001.fastq.gz" "$TEMPDIR/${LONGPREFIX}_L002_R1_001.fastq.gz" | pigz -c -p 20 - > $TEMPDIR/${PREFIX}_R1.fastq.gz
+pigz -c -d -p 10 "$TEMPDIR/${LONGPREFIX}_L001_R2_001.fastq.gz" "$TEMPDIR/${LONGPREFIX}_L002_R2_001.fastq.gz" | pigz -c -p 20 - > $TEMPDIR/${PREFIX}_R2.fastq.gz
+fastp -w 16 -l 30 -a CTGTCTCTTATACACATCT -i $TEMPDIR/${PREFIX}_R1.fastq.gz -I $TEMPDIR/${PREFIX}_R2.fastq.gz -o $TEMPDIR/${PREFIX}_R1.tr.fq.gz -O $TEMPDIR/${PREFIX}_R2.tr.fq.gz -j $TEMPDIR/$PREFIX.json -h $TEMPDIR/$PREFIX.html
+mv $TEMPDIR/*.tr.fq.gz $TRIMMED/
+mv $TEMPDIR/$PREFIX.json $QUALS/
+mv $TEMPDIR/$PREFIX.html $QUALS/
+rm $TEMPDIR/*.fastq.gz
+done
+source deactivate
+```
+
+## Align with bowtie 2 and mark duplicates, keep only discordant pairs
+
+```{sh}
+source activate ivana2020
+zcat $INDEXROOT/Mm_GRC38_dna.fa.gz > $TEMPDIR/refGenome.fasta
+bowtie2-build --offrate 3 $TEMPDIR/refGenome.fasta $INDEXROOT/bowtie2/index
+rm $TEMPDIR/refGenome.fasta
+source deactivate
+
+source activate ivana2020
+for CURFILE in $TRIMMED/*_R1.tr.fq.gz; do
+PREFIX=$(basename $CURFILE _R1.tr.fq.gz)
+if [ "$PREFIX" != "S1" ]; then
+cp $TRIMMED/${PREFIX}_* $TEMPDIR/
+bowtie2 -p 28 --no-unal --no-discordant -x $INDEX -1 $TEMPDIR/${PREFIX}_R1.tr.fq.gz -2 $TEMPDIR/${PREFIX}_R2.tr.fq.gz 2> $TEMPDIR/${PREFIX}.alignStats | samtools view -q 10 -h -b -F0x4 - > $TEMPDIR/$PREFIX.us.bam
+samtools sort -O bam -@ 20 -T tempoSort -m 4G -o $TEMPDIR/$PREFIX.bam $TEMPDIR/$PREFIX.us.bam
+samtools index $TEMPDIR/$PREFIX.bam
+fi
+java -Xmx80g -jar $PICARD MarkDuplicates INPUT=$TEMPDIR/$PREFIX.bam OUTPUT=$TEMPDIR/$PREFIX.deDup.bam METRICS_FILE=$TEMPDIR/$PREFIX.dupStats CREATE_INDEX=true ASSUME_SORTED=true VALIDATION_STRINGENCY=SILENT
+mv $TEMPDIR/$PREFIX.alignStats $QUALS/
+mv $TEMPDIR/$PREFIX.dupStats $QUALS/
+mv $TEMPDIR/$PREFIX.deDup.* $OUBAM/
+rm $TEMPDIR/$PREFIX*.tr.fq.gz
+rm $TEMPDIR/$PREFIX*bam
+rm $TEMPDIR/$PREFIX*bai
+done
+source deactivate
+```
+
+## Get some read and alignment stats
+
+```{sh}
+rm $TEMPDIR/allPreMetrics.csv
+for CURFILE in $QUALS/*.json; do 
+PREFIX=$(basename $CURFILE .json)
+METRICS=$(python $SCRIPTDIR/extractPreAlignmentMetricsFromFastp.py $CURFILE)
+IFS=';' read -ra METRICSARRAY <<< "$METRICS"
+HEADERSTRING=${METRICSARRAY[0]}
+STATSSTRING=${METRICSARRAY[1]}
+if [ ! -f $TEMPDIR/allPreMetrics.csv ]; then
+echo "sample,$HEADERSTRING" > $TEMPDIR/allPreMetrics.csv
+fi
+echo "$PREFIX,$STATSSTRING" >> $TEMPDIR/allPreMetrics.csv
+done
+mv $TEMPDIR/allPreMetrics.csv $BASEDIR/report/
+
+echo "sample,percentAligned,uniquePercentAligned" > $TEMPDIR/alignMetrics.csv
+for CURFILE in $QUALS/*.alignStats; do 
+PREFIX=$(basename $CURFILE .alignStats)
+PERCENTALIGNED=$( awk '{if ($2 == "overall") {gsub("%", "", $1); print $1}}' $CURFILE )
+UNIQUEPERCENTALIGNED=$( awk 'BEGIN {NUMUNIQUE=0} {if ($0 ~ /aligned concordantly exactly 1 time/) {NUMUNIQUE+=$1} else if ($2 == "reads;") {NUMTOTAL=$1}} END {print NUMUNIQUE/NUMTOTAL*100}' $CURFILE )
+echo "$PREFIX,$PERCENTALIGNED,$UNIQUEPERCENTALIGNED" >> $TEMPDIR/alignMetrics.csv
+done
+mv $TEMPDIR/alignMetrics.csv $BASEDIR/report/
+
+Rscript $SCRIPTDIR/checkPreMetrics.R $BASEDIR/report/sampleTab.csv $BASEDIR/report/allPreMetrics.csv $BASEDIR/report/allPreMetrics
+Rscript $SCRIPTDIR/checkPreMetrics.R $BASEDIR/report/sampleTab.csv $BASEDIR/report/alignMetrics.csv $BASEDIR/report/alignMetrics
+```
+
+## MACS
+
+nfcore does what's recommended [here]https://github.com/macs3-project/MACS/issues/145), do so as well 
+
+```{sh}
+source activate ivana2020
+for CURFILE in $OUBAM/*.bam; do
+PREFIX=$(basename $CURFILE .bam)
+cp $CURFILE $TEMPDIR/
+#cp $CURFILE.bai $TEMPDIR/
+samtools index $TEMPDIR/${PREFIX}.bam
+$SCRIPTDIR/ATAC_macs.sh -t 30 $TEMPDIR $TEMPDIR $PREFIX ${PREFIX}.bam mm
+mv $TEMPDIR/*.bed $DEFAULTPEAKS/
+mv $TEMPDIR/${PREFIX}.bam.bai $OUBAM/
+rm $TEMPDIR/${PREFIX}.bam
+done
+source deactivate
+```
+
+## Bam to BigWig
+
+```{sh}
+source activate ivana2020
+for CURFILE in $OUBAM/*.bam; do
+PREFIX=$(basename $CURFILE .bam)
+cp $CURFILE $TEMPDIR/
+cp $CURFILE.bai $TEMPDIR/
+$SCRIPTDIR/bamTo1xNormalizedBigWig.sh -t 10 $TEMPDIR $TEMPDIR $PREFIX $PREFIX.bam $BWNORMGENOME
+mv $TEMPDIR/*.bw $OUBAM/
+rm $TEMPDIR/*.bam
+rm $TEMPDIR/*.bai
+done
+source deactivate
+```
+
+## Merge peaks
+
+nfcore per default uses all peaks, even if found only in one sample
+
+```{sh}
+T1_Bern=("S5" "S9" "S13" "S17" "S21")
+T1_Hannover1=("S1" "S10" "S14" "S18" "S22")
+T1_Hannover2=("S2" "S6" "S15" "S19" "S23")
+T1_Munster=("S3" "S7" "S11" "S20" "S24")
+T1_Zurich=("S4" "S8" "S12" "S16" "S25")
+
+T2_Bern=("T5" "T9" "T13" "T17" "T21")
+T2_Hannover1=("T1" "T10" "T14" "T18" "T25")
+T2_Hannover2=("T2" "T4" "T6" "T15" "T19")
+T2_Munster=("T3" "T7" "T11" "T20" "T24")
+T2_Zurich=("T26" "T8" "T12" "T16" "T27")
+
+for PEAKTYPE in NP BP GP; do
+### Time point 1
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T1_Bern[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T1.Bern.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T1_Hannover1[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T1.Hannover1.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T1_Hannover2[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T1.Hannover2.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T1_Munster[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T1.Munster.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T1_Zurich[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T1.Zurich.$i.${PEAKTYPE}.bed
+done
+### Time point 2
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T2_Bern[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T2.Bern.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T2_Hannover1[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T2.Hannover1.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T2_Hannover2[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T2.Hannover2.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T2_Munster[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T2.Munster.$i.${PEAKTYPE}.bed
+done
+BEDLIST=$(printf "${DEFAULTPEAKS}/%s.deDup.${PEAKTYPE}.bed " ${T2_Zurich[@]})
+BEDLIST=${BEDLIST::-1}
+for i in {1..5}; do
+multovl -m $i -u -f BED $BEDLIST > $TEMPDIR/T2.Zurich.$i.${PEAKTYPE}.bed
+done
+### Common
+for i in {1..5}; do #within group 1, 2, or 3 occurences - across groups only occurence in one group required
+multovl -m 1 -u -f BED $TEMPDIR/*$i.${PEAKTYPE}.bed > $TEMPDIR/union.$i.${PEAKTYPE}.rawBed
+awk -v OFS='\t' '{if (substr($0,1,1)!="#") {if ((length($1) < 3)&&($1!="MT")){print $0}}}' $TEMPDIR/union.$i.${PEAKTYPE}.rawBed | sort -k1,1n -k2,2n | awk -v OFS='\t' 'BEGIN{COUNTER=0}{COUNTER+=1; print "chr"$1,$2,$3,"peak"COUNTER,$5,"."}' > $TEMPDIR/union.$i.${PEAKTYPE}.bed
+done
+mv $TEMPDIR/*.${PEAKTYPE}.rawBed $MERGEDPEAKS/
+mv $TEMPDIR/*.${PEAKTYPE}.bed $MERGEDPEAKS/
+done
+```
+
+## Check peak overlaps
+
+```{sh}
+echo "peakType,timePointAndLab,peakInAtLeastXSamples,numPeaks" > $TEMPDIR/peakCounts.csv
+for PEAKTYPE in NP BP GP; do
+for GROUP in ${ALLGROUPS[@]}; do
+for i in {1..5}; do
+NUMLINES=$(wc -l $MERGEDPEAKS/$GROUP.$i.$PEAKTYPE.bed | awk '{print $1}')
+echo "$PEAKTYPE,$GROUP,$i,$NUMLINES" >> $TEMPDIR/peakCounts.csv
+done
+done
+done
+mv $TEMPDIR/peakCounts.csv $BASEDIR/report/
+
+echo "sample,peakType,numPeaks" > $TEMPDIR/peakCountsPerSample.csv
+for PEAKTYPE in NP BP GP; do
+for PEAKFILE in $DEFAULTPEAKS/*.deDup.$PEAKTYPE.bed.gz; do
+PREFIX=$(basename $PEAKFILE .deDup.$PEAKTYPE.bed.gz)
+NUMLINES=$(zcat $PEAKFILE | wc -l | awk '{print $1}')
+echo "$PREFIX,$PEAKTYPE,$NUMLINES" >> $TEMPDIR/peakCountsPerSample.csv
+done
+done
+mv $TEMPDIR/peakCountsPerSample.csv $BASEDIR/report/
+
+Rscript $SCRIPTDIR/checkPeakCounts.R $BASEDIR/report/sampleTab.csv $BASEDIR/report/peakCounts.csv $BASEDIR/report/peakCounts
+Rscript $SCRIPTDIR/checkPeakCountsPerSample.R $BASEDIR/report/sampleTab.csv $BASEDIR/report/peakCountsPerSample.csv $BASEDIR/report/peakCountsPerSample
+```
+
+## Compress peak files that are not needed anymore
+
+```{sh}
+for GROUP in ${ALLGROUPS[@]}; do
+pigz -p 20 $MERGEDPEAKS/$GROUP.*.*.bed
+done
+pigz -p 20 $DEFAULTPEAKS/*.bed
+pigz -p 20 $MERGEDPEAKS/*.rawBed
+```
+
+## Annotate peaks with homer
+
+```{sh}
+# annotate as well with homer
+export PATH="$PATH:/home/marc/homer/bin"
+for PEAKFILE in $MERGEDPEAKS/union*.bed; do
+PREFIX=$(basename $PEAKFILE .bed)
+annotatePeaks.pl $PEAKFILE mm10 -annStats $TEMPDIR/$PREFIX.annot.stats > $TEMPDIR/$PREFIX.annot
+awk -v OFS=',' -F'\t' '{if (NR>1) {print $1,$2,$3,$4,$10,$15} else {print "PeakID","Chr","Start","End", "DistanceToTSS", "GeneID"}}' $TEMPDIR/$PREFIX.annot > $TEMPDIR/$PREFIX.annot.simple
+mv $TEMPDIR/*.anno* $MERGEDPEAKS/
+done
+
+pigz -p 20 $MERGEDPEAKS/*.annot
+pigz -p 20 $MERGEDPEAKS/*.annot.simple
+
+#zcat $MERGEDPEAKS/$PREFIX.annot.gz | awk '{if (($2=="chr1")&&($3=="30948589")&&($4=="30950432")) {print $0}}'
+```
+
+## Annotate peaks with ChIPseeker
+
+```{sh}
+for PEAKFILE in $MERGEDPEAKS/union*.bed; do
+PREFIX=$(basename $PEAKFILE .bed)
+$SCRIPTDIR/annotatePeaks.R $PEAKFILE $MERGEDPEAKS/$PREFIX.csAnnot --skipExisting
+done
+
+pigz -f -p 20 $MERGEDPEAKS/*.csAnnot
+pigz -f -p 20 $MERGEDPEAKS/*.csAnnot.withDescription
+```
+
+## Count reads
+
+```{sh}
+### manually changed the file and deleted the ignore duplicate line
+source activate ivana2020
+cp $OUBAM/*.bam $TEMPDIR/
+for PEAKFILEWP in $MERGEDPEAKS/union*.bed; do
+PEAKFILE=$(basename "$PEAKFILEWP")
+$SCRIPTDIR/countReadsPerFlatRegion.sh -t 30 $MERGEDPEAKS $TEMPDIR ${PEAKFILE//.bed} $PEAKFILE $TEMPDIR/*.bam
+pigz -p 20 $TEMPDIR/*.counts.*
+mv $TEMPDIR/*.counts.*.gz $COUNTDIR/
+done
+source deactivate
+```
+
+## Differential binding
+
+**Use the withinBlockBatch for the analysis separated by time points**
+
+**Note: nf_core uses broad peaks**
+
+```{sh}
+runDiffBind () {
+    local PREFIX=$(basename $1 .counts.txt.gz)
+    zcat $1 > $TEMPDIR/$PREFIX.counts.txt
+    sleep 5
+    Rscript $SCRIPTDIR/doOverviewPlot.R $BASEDIR/report/sampleTab.csv $TEMPDIR/$PREFIX.counts.txt $RESULTS/$PREFIX.plots
+    Rscript $SCRIPTDIR/differentialBinding.R $BASEDIR/report/sampleTab.csv $TEMPDIR/$PREFIX.counts.txt $RESULTS/$PREFIX.bothTimePoints
+    #Rscript $SCRIPTDIR/differentialBindingWithBatch.R $BASEDIR/report/sampleTab.csv $TEMPDIR/$PREFIX.counts.txt $RESULTS/$PREFIX.bothTimePointsWithBatch
+    Rscript $SCRIPTDIR/differentialBindingOnlyOneTimepoint.R T1 $BASEDIR/report/sampleTab.csv $TEMPDIR/$PREFIX.counts.txt $RESULTS/$PREFIX.onlyTimePointOne
+    Rscript $SCRIPTDIR/differentialBindingOnlyOneTimepoint.R T2 $BASEDIR/report/sampleTab.csv $TEMPDIR/$PREFIX.counts.txt $RESULTS/$PREFIX.onlyTimePointTwo
+    sleep 5
+    cd
+}
+# parallel doesnt work, try single quotes or export the function? Doesnt work either
+#ls $COUNTDIR/*.counts.txt.gz | parallel -j 15 'runDiffBind {}'
+for COUNTFILE in $COUNTDIR/*.counts.txt.gz; do runDiffBind $COUNTFILE & done; wait
+
+COUNTFILE=$COUNTDIR/union.3.BP.counts.txt.gz
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+zcat $COUNTFILE > $TEMPDIR/$PREFIX.counts.txt
+Rscript $SCRIPTDIR/doOverviewPlot.R $BASEDIR/report/sampleTab.csv $TEMPDIR/$PREFIX.counts.txt $RESULTS/$PREFIX.plots
+```
+
+## Compare with/without batch analyses
+
+```{sh}
+for COUNTFILE in $COUNTDIR/*.counts.txt.gz; do
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+Rscript $SCRIPTDIR/compareBatchToNoBatch.R $RESULTS/$PREFIX.onlyTimePointOne.Rdata $RESULTS/$PREFIX.onlyTimePointOne
+Rscript $SCRIPTDIR/compareBatchToNoBatch.R $RESULTS/$PREFIX.onlyTimePointTwo.Rdata $RESULTS/$PREFIX.onlyTimePointTwo
+done
+```
+
+## Write overview tables from differential binding analyses
+
+```{sh}
+for COUNTFILE in $COUNTDIR/*.counts.txt.gz; do
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+Rscript $SCRIPTDIR/writeDiffBindOverview.R $RESULTS/$PREFIX.bothTimePoints.Rdata $RESULTS/$PREFIX.bothTimePoints
+Rscript $SCRIPTDIR/writeDiffBindOverview.R $RESULTS/$PREFIX.onlyTimePointOne.Rdata $RESULTS/$PREFIX.onlyTimePointOne
+Rscript $SCRIPTDIR/writeDiffBindOverview.R $RESULTS/$PREFIX.onlyTimePointTwo.Rdata $RESULTS/$PREFIX.onlyTimePointTwo
+done
+```
+
+## Within group variation analysis
+
+```{sh}
+COUNTFILE=$COUNTDIR/union.3.BP.counts.txt.gz
+for COUNTFILE in $COUNTDIR/*.counts.txt.gz; do
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+Rscript $SCRIPTDIR/withinGroupVariability.R $RESULTS/$PREFIX.bothTimePoints.Rdata $RESULTS/$PREFIX.withinGroupVariability
+Rscript $SCRIPTDIR/withinGroupVariabilitSeparate.R $RESULTS/$PREFIX.bothTimePoints.Rdata $RESULTS/$PREFIX.withinGroupVariabilitySeparate
+done
+```
+
+## Characterize peaks
+
+```{sh}
+for ANNOTPEAKFILE in $MERGEDPEAKS/*.csAnnot.gz; do
+PREFIX=$(basename $ANNOTPEAKFILE .csAnnot.gz)
+zcat $ANNOTPEAKFILE > $TEMPDIR/$PREFIX.csv
+Rscript $SCRIPTDIR/characterizePeaks.R $TEMPDIR/$PREFIX.csv $MERGEDPEAKS/$PREFIX.peakChar
+done
+```
+
+## Bed files for significant peaks
+
+```{sh}
+mkdir -p $RESULTS/bedFiles
+for COUNTFILE in $COUNTDIR/*.counts.txt.gz; do
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+Rscript $SCRIPTDIR/getBedFiles.R $RESULTS/$PREFIX.bothTimePoints.Rdata $RESULTS/bedFiles/$PREFIX.bothTimePoints
+Rscript $SCRIPTDIR/getBedFiles.R $RESULTS/$PREFIX.onlyTimePointOne.Rdata $RESULTS/bedFiles/$PREFIX.onlyTimePointOne
+Rscript $SCRIPTDIR/getBedFiles.R $RESULTS/$PREFIX.onlyTimePointTwo.Rdata $RESULTS/bedFiles/$PREFIX.onlyTimePointTwo
+done
+
+pigz -p 4 $RESULTS/bedFiles/*.bed
+```
+
+## Characterize genes or at least collect gene IDs
+
+```{sh}
+mkdir -p $RESULTS/geneSets
+for COUNTFILE in $COUNTDIR/union.3.BP*.counts.txt.gz; do
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+zcat $MERGEDPEAKS/$PREFIX.csAnnot.gz > $TEMPDIR/$PREFIX.csAnnot.csv
+zcat $MERGEDPEAKS/$PREFIX.annot.simple.gz > $TEMPDIR/$PREFIX.homer.csv
+#Rscript $SCRIPTDIR/getGeneSets.R $RESULTS/$PREFIX.bothTimePoints.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $TEMPDIR/$PREFIX.homer.csv $RESULTS/geneSets/$PREFIX.bothTimePoints.minLFC_0.5
+Rscript $SCRIPTDIR/getGeneSets.R $RESULTS/$PREFIX.onlyTimePointOne.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $TEMPDIR/$PREFIX.homer.csv $RESULTS/geneSets/$PREFIX.onlyTimePointOne.minLFC_0.5
+Rscript $SCRIPTDIR/getGeneSets.R $RESULTS/$PREFIX.onlyTimePointTwo.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $TEMPDIR/$PREFIX.homer.csv $RESULTS/geneSets/$PREFIX.onlyTimePointTwo.minLFC_0.5
+done
+
+pigz -p 4 $RESULTS/geneSets/*.csv
+mkdir -p $HOME/Downloads/forIvana
+cp $RESULTS/geneSets/union.3.BP.onlyTimePoint*minLFC_0.5* $HOME/Downloads/forIvana/
+```
+
+## GO and KEGG enrichment
+
+```{sh}
+mkdir -p $RESULTS/enrichment
+for COUNTFILE in $COUNTDIR/*BP*.counts.txt.gz; do
+#COUNTFILE=$COUNTDIR/union.3.BP.counts.txt.gz
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+zcat $MERGEDPEAKS/$PREFIX.csAnnot.gz > $TEMPDIR/$PREFIX.csAnnot.csv
+zcat $MERGEDPEAKS/$PREFIX.annot.simple.gz > $TEMPDIR/$PREFIX.homer.csv
+Rscript $SCRIPTDIR/functionalEnrichment.R $RESULTS/$PREFIX.bothTimePoints.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $TEMPDIR/$PREFIX.homer.csv $RESULTS/enrichment/$PREFIX.bothTimePoints
+Rscript $SCRIPTDIR/functionalEnrichment.R $RESULTS/$PREFIX.onlyTimePointOne.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $TEMPDIR/$PREFIX.homer.csv $RESULTS/enrichment/$PREFIX.onlyTimePointOne
+Rscript $SCRIPTDIR/functionalEnrichment.R $RESULTS/$PREFIX.onlyTimePointTwo.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $TEMPDIR/$PREFIX.homer.csv $RESULTS/enrichment/$PREFIX.onlyTimePointTwo
+pigz -f -p 4 $RESULTS/enrichment/ALL*.txt
+pigz -f -p 4 $RESULTS/enrichment/ALL*.csv
+done
+
+for ENRICHFILE in $RESULTS/enrichment/*.bothTimePoints*_minNodeSize_*.txt; do
+sed -i "s/'//g" $ENRICHFILE
+Rscript $SCRIPTDIR/plotClustergrams.R topgo 0.05 $ENRICHFILE ${ENRICHFILE//.txt}.svg
+done
+
+for ENRICHFILE in $RESULTS/enrichment/*.bothTimePoints*KEGG.csv; do
+sed -i "s/'//g" $ENRICHFILE
+Rscript $SCRIPTDIR/plotClustergrams.R chipseeker 0.05 $ENRICHFILE ${ENRICHFILE//.csv}.svg
+done
+
+for ENRICHFILE in $RESULTS/enrichment/*.onlyTimePoint*_minNodeSize_*.txt; do
+sed -i "s/'//g" $ENRICHFILE
+Rscript $SCRIPTDIR/plotClustergrams.R topgo 0.05 $ENRICHFILE ${ENRICHFILE//.txt}.svg
+done
+
+for ENRICHFILE in $RESULTS/enrichment/*.onlyTimePoint*KEGG.csv; do
+sed -i "s/'//g" $ENRICHFILE
+Rscript $SCRIPTDIR/plotClustergrams.R chipseeker 0.05 $ENRICHFILE ${ENRICHFILE//.csv}.svg
+done
+
+pigz -p 4 $RESULTS/enrichment/*.csv
+pigz -p 4 $RESULTS/enrichment/*.txt
+pigz -f -p 4 $RESULTS/enrichment/*.svg
+
+# plot GO terms in a different style
+cp $RESULTS/enrichment/ALL*union.3.BP*bothTimePoints* $TEMPDIR/
+gunzip -f $TEMPDIR/ALL*union.3.BP*.gz
+Rscript $SCRIPTDIR/plot_GO_terms.R $TEMPDIR
+mv $TEMPDIR/*.svg $RESULTS/enrichment/
+rm $TEMPDIR/*
+
+cp $RESULTS/enrichment/ALL*union.3.BP*onlyTimePointOne* $TEMPDIR/
+gunzip -f $TEMPDIR/ALL*union.3.BP*.gz
+Rscript $SCRIPTDIR/plot_GO_terms.R $TEMPDIR
+mv $TEMPDIR/*.svg $RESULTS/enrichment/
+rm $TEMPDIR/*
+
+cp $RESULTS/enrichment/ALL*union.3.BP*onlyTimePointTwo* $TEMPDIR/
+gunzip -f $TEMPDIR/ALL*union.3.BP*.gz
+Rscript $SCRIPTDIR/plot_GO_terms.R $TEMPDIR
+mv $TEMPDIR/*.svg $RESULTS/enrichment/
+rm $TEMPDIR/*
+```
+
+## Do an overview with the 10 % most and least accessible regions
+
+```{sh}
+mkdir -p $RESULTS/openAndClose
+for COUNTFILE in $COUNTDIR/*BP*.counts.txt.gz; do
+#COUNTFILE=$COUNTDIR/union.3.BP.counts.txt.gz
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+zcat $MERGEDPEAKS/$PREFIX.csAnnot.gz > $TEMPDIR/$PREFIX.csAnnot.csv
+zcat $MERGEDPEAKS/$PREFIX.annot.simple.gz > $TEMPDIR/$PREFIX.homer.csv
+Rscript $SCRIPTDIR/openAndClose.R $RESULTS/$PREFIX.bothTimePoints.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $TEMPDIR/$PREFIX.homer.csv $RESULTS/openAndClose/$PREFIX.bothTimePoints
+done
+```
+
+## Heatmaps with Deeptools
+
+### Average bigwigs
+
+```{sh}
+cp $OUBAM/*.bw $TEMPDIR/
+awk -F',' -v OFS='\t' '{if (NR>1) {print $1".deDup.norm",$2"_"$3}}' $BASEDIR/report/sampleTab.csv > $BASEDIR/report/groupingForBigWigs.txt
+
+source activate ivana2020
+python $SCRIPTDIR/averageBigWigs.py $TEMPDIR $BASEDIR/report/groupingForBigWigs.txt
+source deactivate
+
+cp $TEMPDIR/T*.bw $OUBAM/
+rm $TEMPDIR/*.deDup.norm.bw
+```
+
+### Regulatory build
+
+```{sh}
+source activate ivana2020
+# get matrices
+for BEDFILE in $REGULATORYDIR/*.bed; do
+PREFIX=$(basename "$BEDFILE" .bed)
+echo $PREFIX
+computeMatrix reference-point -p 10 -S $TEMPDIR/T*.bw -o $TEMPDIR/${PREFIX}.norm.dirty.mat.gz -R $BEDFILE --referencePoint center -a 2000 -b 2000 --skipZeros
+zcat $TEMPDIR/${PREFIX}.norm.dirty.mat.gz | sed 's/genes/'"$PREFIX"'/' | pigz -f -c -p 4 > $TEMPDIR/${PREFIX}.norm.mat.gz
+rm $TEMPDIR/${PREFIX}.*.dirty.mat.gz
+mv $TEMPDIR/${PREFIX}.norm.mat.gz $DEEPTOOLSDIR/
+done
+
+BEDFILE="/media/mwschmid/archiveNoBackup/genomes/ensembl102/MmGRCm38dna/regulatory/CTCFBindingSite.bed"
+computeMatrix reference-point -p 10 -S $TEMPDIR/T*.bw -o $TEMPDIR/${PREFIX}.norm.dirty.mat.gz -R $BEDFILE --referencePoint center -a 100 -b 100 --skipZeros
+zcat $TEMPDIR/${PREFIX}.norm.dirty.mat.gz | sed 's/genes/'"$PREFIX"'/' | pigz -f -c -p 4 > $TEMPDIR/${PREFIX}.less.norm.mat.gz
+ls -lhrt $TEMPDIR
+rm $TEMPDIR/${PREFIX}.*.dirty.mat.gz
+mv $TEMPDIR/${PREFIX}.less.norm.mat.gz $DEEPTOOLSDIR/
+
+# plot heatmaps or profiles with plotProfile, not necessary: --samplesLabel $MYSAMPLELABELS
+for MATFILE in $DEEPTOOLSDIR/*.norm.mat.gz; do
+plotHeatmap --colorMap Reds --dpi 200 --yAxisLabel coverage --xAxisLabel "distance to MP" --refPointLabel MP -m $MATFILE -out ${MATFILE//.mat.gz}.png
+done 
+source deactivate
+```
+
+# Collect results V1
+
+```{sh}
+PREFIX="union.3.BP"
+
+COLLECTROOT="$HOME/Downloads/Ivana_V1"
+COLLECT="$COLLECTROOT/_files"
+mkdir -p $COLLECT/qualityChecks
+mkdir -p $COLLECT/peaks
+mkdir -p $COLLECT/diffBind
+# 
+cp $BASEDIR/report/peakCou* $COLLECT/qualityChecks/
+cp $BASEDIR/report/*Metri* $COLLECT/qualityChecks/
+cp $BASEDIR/report/sampleThresholdScatters.png $COLLECT/qualityChecks/
+cp $DEEPTOOLSDIR/CTCFBindingSite.norm.png $COLLECT/qualityChecks/
+cp $DEEPTOOLSDIR/CTCFBindingSite.less.norm.png $COLLECT/qualityChecks/
+#
+cp $RESULTS/$PREFIX.plots.sampleCorrelation.onlyHighVarPeaks.pdf $COLLECT/peaks/
+cp $RESULTS/$PREFIX.plots.sampleCorrelation.pdf $COLLECT/peaks/
+cp $RESULTS/$PREFIX.plots_average_norm_allinone_0_many.tiff $COLLECT/peaks/
+cp $RESULTS/$PREFIX.plots_PCA.svg $COLLECT/peaks/
+cp $MERGEDPEAKS/$PREFIX.peakChar.genomicFeatures.svg $COLLECT/peaks/
+cp $MERGEDPEAKS/$PREFIX.peakChar.distToTSS.svg $COLLECT/peaks/
+#
+cp $MERGEDPEAKS/$PREFIX.annot.simple.gz $COLLECT/peaks/
+cp $MERGEDPEAKS/$PREFIX.csAnnot.withDescription.gz $COLLECT/peaks/
+gzip -c $MERGEDPEAKS/$PREFIX.bed > $COLLECT/peaks/$PREFIX.bed.gz
+cp $RESULTS/$PREFIX.withinGroupVariability* $COLLECT/peaks/
+# 
+cp $RESULTS/$PREFIX*.xlsx $COLLECT/diffBind/
+cp $RESULTS/geneSets/$PREFIX*.csv $COLLECT/diffBind/
+cp $RESULTS/$PREFIX*.batchVsNoBatch.csv $COLLECT/diffBind/
+# 
+cp $BASEDIR/report/results_V1.html $COLLECTROOT/
+```
+
+# Collect more data
+
+```{sh}
+PREFIX="union.3.BP"
+COLLECTROOT="$HOME/Downloads/Ivana_V1_ads"
+COLLECT="$COLLECTROOT/_files"
+mkdir -p $COLLECT/RDAs
+mkdir -p $COLLECT/PCAs
+mkdir -p $COLLECT/bigWigsSeparate
+mkdir -p $COLLECT/bigWigsAveraged
+mkdir -p $COLLECT/bedFiles
+mkdir -p $COLLECT/KEGG/homer
+mkdir -p $COLLECT/KEGG/chipseeker
+mkdir -p $COLLECT/GO/homer
+mkdir -p $COLLECT/GO/chipseeker
+cp $RESULTS/$PREFIX*PCA*svg $COLLECT/PCAs/
+cp $RESULTS/$PREFIX*RDA*svg $COLLECT/RDAs/
+cp $OUBAM/*.bw $COLLECT/bigWigsAveraged/
+mv $COLLECT/bigWigsAveraged/*.norm.bw $COLLECT/bigWigsSeparate/
+cp $RESULTS/bedFiles/$PREFIX*.bed.gz $COLLECT/bedFiles/
+cp $RESULTS/enrichment/$PREFIX*.csv $COLLECT/KEGG/
+cp $RESULTS/enrichment/$PREFIX*KEGG.svg $COLLECT/KEGG/
+cp $RESULTS/enrichment/$PREFIX*.txt $COLLECT/GO/
+cp $RESULTS/enrichment/$PREFIX*minNodeSize*.svg $COLLECT/GO/
+mv $COLLECT/KEGG/*homer*.csv $COLLECT/KEGG/homer/
+mv $COLLECT/KEGG/*homer*.svg $COLLECT/KEGG/homer/
+mv $COLLECT/KEGG/*chipSeeker*.csv $COLLECT/KEGG/chipseeker/
+mv $COLLECT/KEGG/*chipSeeker*.svg $COLLECT/KEGG/chipseeker/
+mv $COLLECT/GO/*homer*.txt $COLLECT/GO/homer/
+mv $COLLECT/GO/*homer*.svg $COLLECT/GO/homer/
+mv $COLLECT/GO/*chipSeeker*.txt $COLLECT/GO/chipseeker/
+mv $COLLECT/GO/*chipSeeker*.svg $COLLECT/GO/chipseeker/
+cp $BASEDIR/report/results_V1_ads.html $COLLECTROOT/
+```
+
+```{sh}
+PREFIX="union.3.BP"
+COLLECTROOT="$HOME/Downloads/Ivana_V1_ads_more_go"
+COLLECT="$COLLECTROOT/_files"
+mkdir -p $COLLECT/GO/homer
+mkdir -p $COLLECT/GO/chipseeker
+cp $RESULTS/enrichment/$PREFIX*.txt $COLLECT/GO/
+cp $RESULTS/enrichment/$PREFIX*minNodeSize*.svg $COLLECT/GO/
+mv $COLLECT/GO/*homer*.txt $COLLECT/GO/homer/
+mv $COLLECT/GO/*homer*.svg $COLLECT/GO/homer/
+mv $COLLECT/GO/*chipSeeker*.txt $COLLECT/GO/chipseeker/
+mv $COLLECT/GO/*chipSeeker*.svg $COLLECT/GO/chipseeker/
+```
+
+```{sh}
+PREFIX="union.3.BP"
+COLLECTROOT="$HOME/Downloads/Ivana_V1_lowerThreshold"
+COLLECT="$COLLECTROOT/_files"
+mkdir -p $COLLECT/GO/homer
+mkdir -p $COLLECT/GO/chipSeeker
+mkdir -p $COLLECT/KEGG/homer
+mkdir -p $COLLECT/KEGG/chipSeeker
+mkdir -p $COLLECT/geneSets
+for CURMETH in homer chipSeeker; do
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*oto*$CURMETH*.txt.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*otm*$CURMETH*.txt.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*time*$CURMETH*.txt.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*oto*$CURMETH*odeSize*.svg.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*otm*$CURMETH*odeSize*.svg.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*time*$CURMETH*odeSize*.svg.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*oto*$CURMETH*KEGG*.gz $COLLECT/KEGG/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*otm*$CURMETH*KEGG*.gz $COLLECT/KEGG/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.bothTimePoints*time*$CURMETH*KEGG*.gz $COLLECT/KEGG/$CURMETH/
+done
+cp $RESULTS/geneSets/$PREFIX.bothTimePoints.minLFC_0.5*.csv.gz $COLLECT/geneSets/
+cp $RESULTS/geneSets/$PREFIX.bothTimePoints.minLFC_0.0*.csv.gz $COLLECT/geneSets/
+```
+
+```{sh}
+PREFIX="union.3.BP"
+COLLECTROOT="$HOME/Downloads/Ivana_V1_lowerThreshold_separateTimePoints"
+COLLECT="$COLLECTROOT/_files"
+mkdir -p $COLLECT/GO/homer
+mkdir -p $COLLECT/GO/chipSeeker
+mkdir -p $COLLECT/KEGG/homer
+mkdir -p $COLLECT/KEGG/chipSeeker
+mkdir -p $COLLECT/geneSets
+for CURMETH in homer chipSeeker; do
+cp $RESULTS/enrichment/$PREFIX.onlyTimePoint*oto*$CURMETH*.txt.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.onlyTimePoint*otm*$CURMETH*.txt.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.onlyTimePoint*oto*$CURMETH*odeSize*.svg.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.onlyTimePoint*otm*$CURMETH*odeSize*.svg.gz $COLLECT/GO/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.onlyTimePoint*oto*$CURMETH*KEGG*.gz $COLLECT/KEGG/$CURMETH/
+cp $RESULTS/enrichment/$PREFIX.onlyTimePoint*otm*$CURMETH*KEGG*.gz $COLLECT/KEGG/$CURMETH/
+done
+cp $RESULTS/geneSets/$PREFIX.onlyTimePoint*.minLFC_0.5*.csv.gz $COLLECT/geneSets/
+
+for CURSET in $PREFIX.onlyTimePointOne.minLFC_0.5.allGenes.csv.gz $PREFIX.onlyTimePointOne.minLFC_0.5.onlyCloseToTSS.csv.gz $PREFIX.onlyTimePointTwo.minLFC_0.5.allGenes.csv.gz $PREFIX.onlyTimePointTwo.minLFC_0.5.onlyCloseToTSS.csv.gz; do
+#CURSET=$PREFIX.onlyTimePointOne.minLFC_0.5.allGenes.csv.gz
+zcat $RESULTS/geneSets/$CURSET | head -n 1 | awk -F',' -v OFS=',' '{print $1,$5,$6,$7,$8,$9,$10,$11,$12,$13}' > $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.peaks.oto.csv
+zcat $RESULTS/geneSets/$CURSET | head -n 1 | awk -F',' -v OFS=',' '{print $1,$5,$6,$7,$8,$9,$10,$11,$12,$13}' > $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.peaks.otm.csv
+zcat $RESULTS/geneSets/$CURSET | fgrep '"oto_' | awk -F',' -v OFS=',' '{print $1,$5,$6,$7,$8,$9,$10,$11,$12,$13}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.peaks.oto.csv
+zcat $RESULTS/geneSets/$CURSET | fgrep '"otm_' | awk -F',' -v OFS=',' '{print $1,$5,$6,$7,$8,$9,$10,$11,$12,$13}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.peaks.otm.csv
+## homer
+zcat $RESULTS/geneSets/$CURSET | head -n 1 | awk -F',' -v OFS=',' '{print $6,$7,$8}' > $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.homer.oto.csv
+zcat $RESULTS/geneSets/$CURSET | head -n 1 | awk -F',' -v OFS=',' '{print $6,$7,$8}' > $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.homer.otm.csv
+## chipseeker
+zcat $RESULTS/geneSets/$CURSET | head -n 1 | awk -F',' -v OFS=',' '{print $11,$12,$13}' > $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.chipseeker.oto.csv
+zcat $RESULTS/geneSets/$CURSET | head -n 1 | awk -F',' -v OFS=',' '{print $11,$12,$13}' > $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.chipseeker.otm.csv
+if [[ $CURSET =~ "onlyCloseToTSS" ]]; then
+## homer
+zcat $RESULTS/geneSets/$CURSET | fgrep '"oto_' | awk -F',' -v OFS=',' '{if (($5 < 2000)&&($5 > -2000)) {print $6,$7,$8}}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.homer.oto.csv
+zcat $RESULTS/geneSets/$CURSET | fgrep '"otm_' | awk -F',' -v OFS=',' '{if (($5 < 2000)&&($5 > -2000)) {print $6,$7,$8}}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.homer.otm.csv
+## chipseeker
+zcat $RESULTS/geneSets/$CURSET | fgrep '"oto_' | awk -F',' -v OFS=',' '{if (($10 < 2000)&&($10 > -2000)) {print $11,$12,$13}}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.chipseeker.oto.csv
+zcat $RESULTS/geneSets/$CURSET | fgrep '"otm_' | awk -F',' -v OFS=',' '{if (($10 < 2000)&&($10 > -2000)) {print $11,$12,$13}}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.chipseeker.otm.csv
+else
+## homer
+zcat $RESULTS/geneSets/$CURSET | fgrep '"oto_' | awk -F',' -v OFS=',' '{print $6,$7,$8}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.homer.oto.csv
+zcat $RESULTS/geneSets/$CURSET | fgrep '"otm_' | awk -F',' -v OFS=',' '{print $6,$7,$8}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.homer.otm.csv
+## chipseeker
+zcat $RESULTS/geneSets/$CURSET | fgrep '"oto_' | awk -F',' -v OFS=',' '{print $11,$12,$13}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.chipseeker.oto.csv
+zcat $RESULTS/geneSets/$CURSET | fgrep '"otm_' | awk -F',' -v OFS=',' '{print $11,$12,$13}' | sort | uniq >> $COLLECT/geneSets/${CURSET//.csv.gz}.simplified.genes.chipseeker.otm.csv
+fi
+done
+pigz -p 4 $COLLECT/geneSets/*.csv
+```
+
+```{sh}
+mkdir -p $HOME/Downloads/forMelanie
+cp $BASEDIR/report/sampleTab.csv $HOME/Downloads/forMelanie/
+```
+```{r}
+#load("/media/mwschmid/myData/MWSchmid/Ivana_ATAC/GitIgnore_results/union.3.BP.bothTimePoints.Rdata") 
+#write.csv(myNormData, "/home/marc/Downloads/forMelanie/normData.csv")
+myNormData <- read.csv("/home/marc/Downloads/forMelanie/normData.csv", header = TRUE, row.names = 1)
+distMat <- as.matrix(dist(t(myNormData), "manhattan"))
+diag(distMat) <- NA
+distMat[lower.tri(distMat)] <- NA
+write.csv(distMat, "/home/marc/Downloads/forMelanie/distances.csv")
+```
+
+```{r}
+load("/media/mwschmid/myData/MWSchmid/Ivana_ATAC/GitIgnore_results/union.5.BP.bothTimePoints.Rdata")
+deResults$time_all_T2_vs_T1$get_stats()
+```
+
+# Plot selected terms
+
+```{sh}
+mkdir -p $RESULTS/enrichmentSelected
+cp $RESULTS/enrichment/union.3.BP.bothTimePoints.oto_*.sigPeaks_LFC_0.5.homer_*_minNodeSize_5*txt.gz $RESULTS/enrichmentSelected/
+cp $RESULTS/enrichment/union.3.BP.bothTimePoints.oto_*.sigPeaks_LFC_0.5.homer_KEGG*csv.gz $RESULTS/enrichmentSelected/
+for CURFILE in $RESULTS/enrichmentSelected/*.gz; do
+PREFIX=$(basename $CURFILE .gz)
+PREFIX=${PREFIX%.*}
+#fgrep "$PREFIX" $BASEDIR/report/fromIvana/selectedTerms.csv | fgrep yellow | awk -F',' '{print $1}'> $TEMPDIR/termsToUse.txt
+fgrep "$PREFIX" $BASEDIR/report/fromIvana/selectedTerms.csv | awk -F',' '{print $1}'> $TEMPDIR/termsToUse.txt
+zcat $CURFILE | head -n 1 > $TEMPDIR/$PREFIX.txtOrCsv
+zcat $CURFILE | fgrep -f $TEMPDIR/termsToUse.txt >> $TEMPDIR/$PREFIX.txtOrCsv
+sed -i "s/'//g" $TEMPDIR/$PREFIX.txtOrCsv
+if [[ $PREFIX =~ "KEGG" ]]; then
+Rscript $SCRIPTDIR/plotClustergrams.R chipseeker 0.05 $TEMPDIR/$PREFIX.txtOrCsv $TEMPDIR/$PREFIX.svg
+else
+Rscript $SCRIPTDIR/plotClustergrams.R topgo 0.05 $TEMPDIR/$PREFIX.txtOrCsv $TEMPDIR/$PREFIX.svg
+fi
+mv $TEMPDIR/$PREFIX.svg $RESULTS/enrichmentSelected/
+rm $TEMPDIR/*.txtOrCsv
+done
+
+# KEGG: 7 in common, 2*7 separate
+fgrep "union.3.BP.bothTimePoints.oto_T1.sigPeaks_LFC_0.5.homer_BP_minNodeSize_5" $BASEDIR/report/fromIvana/selectedTerms.csv | awk -F',' '{print $1}'> $TEMPDIR/termsToUse.txt
+zcat $RESULTS/enrichmentSelected/union.3.BP.bothTimePoints.oto_T2.sigPeaks_LFC_0.5.homer_BP_minNodeSize_5.txt.gz | fgrep -f $TEMPDIR/termsToUse.txt | wc -l
+fgrep "union.3.BP.bothTimePoints.oto_T1.sigPeaks_LFC_0.5.homer_MF_minNodeSize_5" $BASEDIR/report/fromIvana/selectedTerms.csv | awk -F',' '{print $1}'> $TEMPDIR/termsToUse.txt
+zcat $RESULTS/enrichmentSelected/union.3.BP.bothTimePoints.oto_T2.sigPeaks_LFC_0.5.homer_MF_minNodeSize_5.txt.gz | fgrep -f $TEMPDIR/termsToUse.txt | wc -l
+fgrep "union.3.BP.bothTimePoints.oto_T1.sigPeaks_LFC_0.5.homer_CC_minNodeSize_5" $BASEDIR/report/fromIvana/selectedTerms.csv | awk -F',' '{print $1}'> $TEMPDIR/termsToUse.txt
+zcat $RESULTS/enrichmentSelected/union.3.BP.bothTimePoints.oto_T2.sigPeaks_LFC_0.5.homer_CC_minNodeSize_5.txt.gz | fgrep -f $TEMPDIR/termsToUse.txt | wc -l
+
+# re-filter pValue later on (only works for topGO)
+mkdir -p $RESULTS/enrichmentSelectedManual
+for DATASET in homer_BP_minNodeSize_5.txt homer_CC_minNodeSize_5.txt homer_MF_minNodeSize_5.txt homer_KEGG.csv; do
+echo $DATASET
+grep "${DATASET//.txt}\\|${DATASET//.csv}" $BASEDIR/report/fromIvana/selectedTerms.csv | awk -F',' '{print $1}'> $TEMPDIR/termsToUse.txt
+for PREFIX in T1 T2; do
+#LONGPREFIX="union.3.BP.bothTimePoints.oto_$PREFIX.sigPeaks_LFC_0.5.$DATASET"
+#fgrep "$PREFIX" $BASEDIR/report/fromIvana/selectedTerms.csv | awk -F',' '{print $1}'> $TEMPDIR/termsToUse.txt
+#if [[ $DATASET =~ "KEGG" ]]; then
+#LONGPREFIX="union.3.BP.bothTimePoints.oto_$PREFIX.sigPeaks_LFC_0.5.$DATASET"
+#else
+#LONGPREFIX="ALL_union.3.BP.bothTimePoints.oto_$PREFIX.sigPeaks_LFC_0.5.$DATASET"
+#fi
+LONGPREFIX="ALL_union.3.BP.bothTimePoints.oto_$PREFIX.sigPeaks_LFC_0.5.$DATASET"
+zcat $RESULTS/enrichment/$LONGPREFIX.gz | head -n 1 > $TEMPDIR/$PREFIX.txtOrCsv
+zcat $RESULTS/enrichment/$LONGPREFIX.gz | fgrep -f $TEMPDIR/termsToUse.txt >> $TEMPDIR/$PREFIX.txtOrCsv
+done
+if [[ $DATASET =~ "KEGG" ]]; then
+Rscript $SCRIPTDIR/plotSelectedTerms.R chipseeker $TEMPDIR/${DATASET//.csv} $TEMPDIR/T1.txtOrCsv $TEMPDIR/T2.txtOrCsv 
+cp $TEMPDIR/${DATASET//.csv}.* $RESULTS/enrichmentSelectedManual/
+else
+Rscript $SCRIPTDIR/plotSelectedTerms.R topgo $TEMPDIR/${DATASET//.txt} $TEMPDIR/T1.txtOrCsv $TEMPDIR/T2.txtOrCsv
+cp $TEMPDIR/${DATASET//.txt}.* $RESULTS/enrichmentSelectedManual/
+fi
+done
+
+zcat $RESULTS/enrichment/ALL_union.3.BP.bothTimePoints.oto_T1.sigPeaks_LFC_0.5.homer_BP_minNodeSize_5.txt | fgrep "GO:0045664"
+zcat $RESULTS/enrichment/ALL_union.3.BP.bothTimePoints.oto_T2.sigPeaks_LFC_0.5.homer_BP_minNodeSize_5.txt | fgrep "GO:0045664"
+```
+
+# Plot more selected terms
+
+```{sh}
+# 
+# re-filter pValue later on (only works for topGO)
+mkdir -p $RESULTS/enrichmentSelectedManualMore
+for DATASET in homer_BP_minNodeSize_5.txt homer_CC_minNodeSize_5.txt homer_KEGG.csv; do
+for FULLPREFIX in onlyTimePointOne.oto_T1 onlyTimePointTwo.oto_T2; do
+PREFIX=${FULLPREFIX#*_}
+#if [[ $DATASET =~ "KEGG" ]]; then
+#LONGPREFIX="union.3.BP.$FULLPREFIX.sigPeaks_LFC_0.5.$DATASET"
+#else
+#LONGPREFIX="ALL_union.3.BP.$FULLPREFIX.sigPeaks_LFC_0.5.$DATASET"
+#fi
+LONGPREFIX="ALL_union.3.BP.$FULLPREFIX.sigPeaks_LFC_0.5.$DATASET"
+zcat $RESULTS/enrichment/$LONGPREFIX.gz | head -n 1 > $TEMPDIR/$PREFIX.txtOrCsv
+zcat $RESULTS/enrichment/$LONGPREFIX.gz | fgrep -f $BASEDIR/report/fromIvanaMore/$DATASET >> $TEMPDIR/$PREFIX.txtOrCsv
+done
+if [[ $DATASET =~ "KEGG" ]]; then
+Rscript $SCRIPTDIR/plotSelectedTerms.R chipseeker $TEMPDIR/${DATASET//.csv} $TEMPDIR/T1.txtOrCsv $TEMPDIR/T2.txtOrCsv --keepOrder $BASEDIR/report/fromIvanaMore/$DATASET
+cp $TEMPDIR/${DATASET//.csv}.* $RESULTS/enrichmentSelectedManualMore/
+else
+Rscript $SCRIPTDIR/plotSelectedTerms.R topgo $TEMPDIR/${DATASET//.txt} $TEMPDIR/T1.txtOrCsv $TEMPDIR/T2.txtOrCsv --keepOrder $BASEDIR/report/fromIvanaMore/$DATASET
+cp $TEMPDIR/${DATASET//.txt}.* $RESULTS/enrichmentSelectedManualMore/
+fi
+done
+```
+
+# Plot more selected terms, final list
+
+taken from /media/mwschmid/myData/MWSchmid/Ivana_ATAC/report/fromIvanaManuscript/*FINALLISTFORMARC_BP*
+
+```{sh}
+# re-filter pValue later on (only works for topGO)
+mkdir -p $RESULTS/enrichmentSelectedManualMoreMore
+for DATASET in homer_BP_minNodeSize_5.txt homer_CC_minNodeSize_5.txt homer_KEGG.csv; do
+for FULLPREFIX in onlyTimePointOne.oto_T1 onlyTimePointTwo.oto_T2; do
+PREFIX=${FULLPREFIX#*_}
+#if [[ $DATASET =~ "KEGG" ]]; then
+#LONGPREFIX="union.3.BP.$FULLPREFIX.sigPeaks_LFC_0.5.$DATASET"
+#else
+#LONGPREFIX="ALL_union.3.BP.$FULLPREFIX.sigPeaks_LFC_0.5.$DATASET"
+#fi
+LONGPREFIX="ALL_union.3.BP.$FULLPREFIX.sigPeaks_LFC_0.5.$DATASET"
+zcat $RESULTS/enrichment/$LONGPREFIX.gz | head -n 1 > $TEMPDIR/$PREFIX.txtOrCsv
+zcat $RESULTS/enrichment/$LONGPREFIX.gz | fgrep -f $BASEDIR/report/fromIvanaManuscript/$DATASET >> $TEMPDIR/$PREFIX.txtOrCsv
+done
+if [[ $DATASET =~ "KEGG" ]]; then
+Rscript $SCRIPTDIR/plotSelectedTerms.R chipseeker $TEMPDIR/${DATASET//.csv} $TEMPDIR/T1.txtOrCsv $TEMPDIR/T2.txtOrCsv --keepOrder $BASEDIR/report/fromIvanaManuscript/$DATASET
+cp $TEMPDIR/${DATASET//.csv}.* $RESULTS/enrichmentSelectedManualMoreMore/
+else
+Rscript $SCRIPTDIR/plotSelectedTerms.R topgo $TEMPDIR/${DATASET//.txt} $TEMPDIR/T1.txtOrCsv $TEMPDIR/T2.txtOrCsv --keepOrder $BASEDIR/report/fromIvanaManuscript/$DATASET
+cp $TEMPDIR/${DATASET//.txt}.* $RESULTS/enrichmentSelectedManualMoreMore/
+fi
+done
+```
+
+# Bonferroni vs Dunn-Sidak
+
+```{r}
+steps <- seq(1, 100, 1)
+dunnSidak <- 1-(1-0.05)^(1/steps)
+bonferr <- 0.05/steps
+plot(steps, -log10(dunnSidak))
+points(steps, -log10(bonferr), col = "red")
+
+1-(1-0.05)^(1/144467)
+1-(1-0.05)^(1/2)
+1-(1-0.05)^(1/4)
+```
+
+# Requests for paper
+
+```{sh}
+Rscript $SCRIPTDIR/request_plotPeakNumbers.R $RESULTS/geneSets/union.3.BP.onlyTimePointOne.minLFC_0.5.numberSigPeaks.csv.gz $BASEDIR/report/forFigureEditing/peakCounts_TP1
+Rscript $SCRIPTDIR/request_plotPeakNumbers.R $RESULTS/geneSets/union.3.BP.onlyTimePointTwo.minLFC_0.5.numberSigPeaks.csv.gz $BASEDIR/report/forFigureEditing/peakCounts_TP2
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $BASEDIR/report/forFigureEditing/boxplotCandidateTP1 chr4_154654980_154655784
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $BASEDIR/report/forFigureEditing/boxplotCandidateTP2 chr4_154654980_154655784
+
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_Col19a1 chr1_24612660_24612848
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_Actrt2 chr4_154654980_154655784
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_Arhgef19 chr4_141242849_141243303
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_Plxnb1 chr9_109097779_109098215
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_Nefm chr14_68167370_68167547
+
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_Calml3 chr13_3760955_3761926
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_Lrrc4c chr2_98662234_98662965
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_Fzd9 chr5_135263946_135264710
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_Syt8 chr7_142437259_142437738
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_Bcam chr7_19770249_19770719
+
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_both_Dlg4 chr11_70018162_70018471
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_both_Syt8 chr7_142437259_142437738
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_both_Fzd9 chr5_135263946_135264710
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_both_Col19a1 chr1_24612660_24612848
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_both_Lrrc4c chr2_98662234_98662965
+
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_both_Dlg4 chr11_70018162_70018471
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_both_Syt8 chr7_142437259_142437738
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_both_Fzd9 chr5_135263946_135264710
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_both_Col19a1 chr1_24612660_24612848
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_both_Lrrc4c chr2_98662234_98662965
+
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $RESULTS/boxplotCandidateTP1_both_Dlg2 chr7_92062669_92064775
+Rscript $SCRIPTDIR/request_accessibilityBoxplots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $RESULTS/boxplotCandidateTP2_both_Dlg2 chr7_92062669_92064775
+
+COUNTFILE=$COUNTDIR/union.3.BP.counts.txt.gz
+PREFIX=$(basename $COUNTFILE .counts.txt.gz)
+zcat $MERGEDPEAKS/$PREFIX.csAnnot.gz > $TEMPDIR/$PREFIX.csAnnot.csv
+Rscript $SCRIPTDIR/request_featurePlots.R $RESULTS/union.3.BP.bothTimePoints.Rdata $TEMPDIR/$PREFIX.csAnnot.csv $BASEDIR/report/forFigureEditing/featurePlot
+#Rscript $SCRIPTDIR/request_featurePlots.R $RESULTS/union.3.BP.onlyTimePointOne.Rdata $BASEDIR/report/forFigureEditing/featurePlotTP1
+#Rscript $SCRIPTDIR/request_featurePlots.R $RESULTS/union.3.BP.onlyTimePointTwo.Rdata $BASEDIR/report/forFigureEditing/featurePlotTP2
+```
+
+## Circos with accessibility
+
+one plot per time and one track per lab
+
+```{sh}
+Rscript $SCRIPTDIR/request_circosTracks.R $RESULTS/union.3.BP.bothTimePoints.Rdata $RESULTS/forCircos
+cp $RESULTS/forCircos* $HOME/circos/data/
+
+cd $HOME/circos
+cp $BASEDIR/report/T1_circos.conf $HOME/circos/etc/circos.conf
+$HOME/circos/bin/circos
+cp circos.png $BASEDIR/report/forFigureEditing/T1_circos.png
+cp circos.svg $BASEDIR/report/forFigureEditing/T1_circos.svg
+
+cp $BASEDIR/report/T2_circos.conf $HOME/circos/etc/circos.conf
+$HOME/circos/bin/circos
+cp circos.png $BASEDIR/report/forFigureEditing/T2_circos.png
+cp circos.svg $BASEDIR/report/forFigureEditing/T2_circos.svg
+```
+
+# collect more for the manuscript
+
+```{sh}
+cp $RESULTS/enrichmentSelectedManualMoreMore/*.heatmap.pdf $BASEDIR/report/fromIvanaManuscript/moreFigures/
+cp $RESULTS/boxplotCandidate* $BASEDIR/report/fromIvanaManuscript/moreFigures/
+```
+
+# get coverage plots for selected genes, doesn't look too great - it's because the peaks are usually far away
+
+```{sh}
+# get the annotation of the GOIs
+Rscript $SCRIPTDIR/getCoveragePlotInput.R $BASEDIR/report/ivanasGOIs.csv $COVERAGEPLOTS/forCoveragePlot.txt
+
+source activate ivana2020
+# extract the coverage info
+for CURFILE in $OUBAM/T1_*.bw $OUBAM/T2_*.bw; do
+FILENAME=$(basename $CURFILE)
+PREFIX=${FILENAME//.bw}
+#cp $CURFILE $TEMPDIR/$FILENAME
+#python $SCRIPTDIR/getTranscriptCoverage.py $COVERAGEPLOTS/forCoveragePlot.txt $TEMPDIR/$FILENAME > $COVERAGEPLOTS/${PREFIX}_transcriptCov.txt
+python $SCRIPTDIR/getGeneCoverage.py 2000 $COVERAGEPLOTS/forCoveragePlot.txt $TEMPDIR/$FILENAME > $COVERAGEPLOTS/${PREFIX}_geneCov.txt
+done
+source deactivate
+
+# plot it
+mkdir -p $COVERAGEPLOTS/both
+mkdir -p $COVERAGEPLOTS/T1
+mkdir -p $COVERAGEPLOTS/T2
+Rscript $SCRIPTDIR/plotGenes.R 2000 $COVERAGEPLOTS/sampleAndFileTab.csv $COVERAGEPLOTS/forCoveragePlot.txt $COVERAGEPLOTS/both --useLog
+Rscript $SCRIPTDIR/plotGenes.R 2000 $COVERAGEPLOTS/sampleAndFileTabT1.csv $COVERAGEPLOTS/forCoveragePlot.txt $COVERAGEPLOTS/T1 --useLog
+Rscript $SCRIPTDIR/plotGenes.R 2000 $COVERAGEPLOTS/sampleAndFileTabT2.csv $COVERAGEPLOTS/forCoveragePlot.txt $COVERAGEPLOTS/T2 --useLog
+```
+
+# Checks, 24th of June 2021
+
+## Percent DAPs close to TSS
+
+```{r}
+out <- list()
+myData <- read.csv("/home/marc/Downloads/forChecksIvana/union.3.BP.onlyTimePointOne.minLFC_0.5.allGenes.csv", header = TRUE, stringsAsFactors = FALSE)
+myData$closeToTss <- abs(myData$homerDistToTSS) < 2000
+subDat <- subset(myData, contrast == "LRT_LAB" & direction == "any")
+out[["LRT_LAB_T1"]] <- c("LRT_T1", round(mean(subDat$closeToTss)*100, 2))
+
+myData <- read.csv("/home/marc/Downloads/forChecksIvana/union.3.BP.onlyTimePointTwo.minLFC_0.5.allGenes.csv", header = TRUE, stringsAsFactors = FALSE)
+myData$closeToTss <- abs(myData$homerDistToTSS) < 2000
+subDat <- subset(myData, contrast == "LRT_LAB" & direction == "any")
+out[["LRT_LAB_T2"]] <- c("LRT_T2", round(mean(subDat$closeToTss)*100, 2))
+
+myData <- read.csv("/home/marc/Downloads/forChecksIvana/union.3.BP.onlyTimePointOne.minLFC_0.5.allGenes.csv", header = TRUE, stringsAsFactors = FALSE)
+myData$closeToTss <- abs(myData$homerDistToTSS) < 2000
+for (curTest in grep("^otm", unique(myData$contrast), value = TRUE)) {
+  subDat <- subset(myData, contrast == curTest & direction == "any")
+  out[[curTest]] <- c(curTest, round(mean(subDat$closeToTss)*100, 2))
+  print(curTest)
+  print(nrow(subDat))
+  print(nrow(subset(myData, contrast == curTest & direction == "up")))
+  print(round(mean(subDat$closeToTss)*100, 2))
+}
+
+myData <- read.csv("/home/marc/Downloads/forChecksIvana/union.3.BP.onlyTimePointTwo.minLFC_0.5.allGenes.csv", header = TRUE, stringsAsFactors = FALSE)
+myData$closeToTss <- abs(myData$homerDistToTSS) < 2000
+for (curTest in grep("^otm", unique(myData$contrast), value = TRUE)) {
+  subDat <- subset(myData, contrast == curTest & direction == "any")
+  out[[curTest]] <- c(curTest, round(mean(subDat$closeToTss)*100, 2))
+  print(curTest)
+  print(nrow(subDat))
+  print(nrow(subset(myData, contrast == curTest & direction == "up")))
+  print(round(mean(subDat$closeToTss)*100, 2))
+}
+out <- do.call("rbind", out)
+colnames(out) <- c("contrast", "percentCloseToTSS")
+rownames(out) <- NULL
+write.csv(out, "/media/mwschmid/myData/MWSchmid/Ivana_ATAC/report/fromIvanaManuscript/percentagesCloseToTSS.csv", row.names = FALSE, quote = FALSE)
+```
+
+# Prepare GEO submission
+
+```{sh}
+GEOSUBMISSION="/home/marc/Downloads/000_Ivana_GEO_submission"
+cp $MERGEDPEAKS/union.3.BP.bed $GEOSUBMISSION/processed_files/mergedPeaks.bed
+cp $RESULTS/union.3.BP.plots.raw.counts.csv $GEOSUBMISSION/processed_files/rawCounts.csv
+cp $RESULTS/union.3.BP.plots.normalized.counts.csv $GEOSUBMISSION/processed_files/normalizedCounts.csv
+pigz -p 2 $GEOSUBMISSION/processed_files/*.bed $GEOSUBMISSION/processed_files/*.csv
+for CURFILE in $DEFAULTPEAKS/*BP.bed.gz; do
+PREFIX=$(basename $CURFILE .deDup.BP.bed.gz)
+cp $CURFILE $GEOSUBMISSION/processed_files/peaks.$PREFIX.bed.gz
+done
+
+
+for SAMPLE in {1..25}; do
+PREFIX="S${SAMPLE}"
+cp $READS/${SAMPLE}_ATAC_S${SAMPLE}_*.fastq.gz $TEMPDIR/
+pigz -c -d -p 2 "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L001_R1_001.fastq.gz" "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L002_R1_001.fastq.gz" | pigz -c -p 4 - > $GEOSUBMISSION/raw_data/${PREFIX}_R1.fastq.gz
+pigz -c -d -p 2 "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L001_R2_001.fastq.gz" "$TEMPDIR/${SAMPLE}_ATAC_S${SAMPLE}_L002_R2_001.fastq.gz" | pigz -c -p 4 - > $GEOSUBMISSION/raw_data/${PREFIX}_R2.fastq.gz
+rm $TEMPDIR/*ATAC*.fastq.gz
+done
+
+for SAMPLE in {1..21} {24..27}; do
+if [ $SAMPLE -eq 4 ]; then
+LONGPREFIX="Sample_4_S23"
+elif [ $SAMPLE -eq 25 ]; then
+LONGPREFIX="Sample_25_S22"
+elif [ $SAMPLE -eq 26 ]; then
+LONGPREFIX="Sample_26_S4"
+elif [ $SAMPLE -eq 27 ]; then
+LONGPREFIX="Sample_27_S25"
+else
+LONGPREFIX="Sample_${SAMPLE}_S${SAMPLE}"
+fi
+PREFIX="T${SAMPLE}"
+cp $READS/$LONGPREFIX*.fastq.gz $TEMPDIR/
+pigz -c -d -p 2 "$TEMPDIR/${LONGPREFIX}_L001_R1_001.fastq.gz" "$TEMPDIR/${LONGPREFIX}_L002_R1_001.fastq.gz" | pigz -c -p 4 - > $GEOSUBMISSION/raw_data/${PREFIX}_R1.fastq.gz
+pigz -c -d -p 2 "$TEMPDIR/${LONGPREFIX}_L001_R2_001.fastq.gz" "$TEMPDIR/${LONGPREFIX}_L002_R2_001.fastq.gz" | pigz -c -p 4 - > $GEOSUBMISSION/raw_data/${PREFIX}_R2.fastq.gz
+rm $TEMPDIR/*L00*.fastq.gz
+done
+
+for CURFILE in $GEOSUBMISSION/raw_data/*.fastq.gz; do
+FILENAME=$(basename $CURFILE)
+MDSUM=$(md5sum $CURFILE | awk '{print $1}')
+echo -e "$FILENAME\t$MDSUM"
+done > $GEOSUBMISSION/md5sums.reads.txt
+
+for CURFILE in $GEOSUBMISSION/processed_files/*.gz; do
+FILENAME=$(basename $CURFILE)
+MDSUM=$(md5sum $CURFILE | awk '{print $1}')
+echo -e "$FILENAME\t$MDSUM"
+done > $GEOSUBMISSION/md5sums.processed.txt
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
